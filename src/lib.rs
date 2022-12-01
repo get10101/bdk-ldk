@@ -143,8 +143,15 @@ where
         let mut tx_builder = wallet.build_tx();
         let fee_rate = client.estimate_fee(target_blocks)?;
 
-        tx_builder
-            .add_recipient(output_script.clone(), value)
+        let balance = wallet.get_balance()?;
+        let drain = balance.get_total() == value;
+
+        if drain {
+            tx_builder.drain_to(output_script.clone())
+        } else {
+            tx_builder
+                .add_recipient(output_script.clone(), value)
+        }
             .fee_rate(fee_rate)
             .enable_rbf();
 
