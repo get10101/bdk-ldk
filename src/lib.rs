@@ -93,12 +93,6 @@ where
         relevant_txids.sort_unstable();
         relevant_txids.dedup();
 
-        let unconfirmed_txids = self.get_unconfirmed(relevant_txids)?;
-        for unconfirmed_txid in unconfirmed_txids {
-            for confirmable in confirmables.iter() {
-                confirmable.transaction_unconfirmed(&unconfirmed_txid);
-            }
-        }
 
         let confirmed_txs = self.get_confirmed_txs_by_block()?;
         for (height, header, tx_list) in confirmed_txs {
@@ -177,17 +171,6 @@ where
         Ok(())
     }
 
-    fn get_unconfirmed(&self, txids: Vec<Txid>) -> Result<Vec<Txid>, Error> {
-        Ok(txids
-            .into_iter()
-            .map(|txid| self.augment_txid_with_confirmation_status(txid))
-            .collect::<Result<Vec<(Txid, bool)>, Error>>()?
-            .into_iter()
-            .filter(|(_txid, confirmed)| !confirmed)
-            .map(|(txid, _)| txid)
-            .collect())
-    }
-
     fn get_confirmed_txs_by_block(
         &self,
     ) -> Result<Vec<(u32, BlockHeader, Vec<TransactionWithPosition>)>, Error> {
@@ -239,17 +222,6 @@ where
         let tip_height = client.get_height()?;
         let tip_header = client.get_header(tip_height)?;
         Ok((tip_height, tip_header))
-    }
-
-    fn augment_txid_with_confirmation_status(&self, txid: Txid) -> Result<(Txid, bool), Error> {
-        let client = self.get_client_lock()?;
-        client
-            .get_tx_status(&txid)
-            .map(|status| match status {
-                Some(status) => (txid, status.confirmed),
-                None => (txid, false),
-            })
-            .map_err(Error::Bdk)
     }
 
     fn get_confirmed_tx(
