@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use bdk::bitcoin::{Address, BlockHeader, Script, Transaction, Txid};
 use bdk::blockchain::{Blockchain, GetHeight, WalletSync};
 use bdk::database::BatchDatabase;
 use bdk::wallet::{AddressIndex, Wallet};
-use bdk::{Balance, FeeRate, SignOptions, SyncOptions};
+use bdk::{Balance, SignOptions, SyncOptions};
 
 pub use indexed_chain::{IndexedChain, TxStatus};
 use lightning::chain::chaininterface::BroadcasterInterface;
@@ -11,7 +11,7 @@ use lightning::chain::chaininterface::{ConfirmationTarget, FeeEstimator};
 use lightning::chain::WatchedOutput;
 use lightning::chain::{Confirm, Filter};
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 
 pub type TransactionWithHeight = (u32, Transaction);
 pub type TransactionWithPosition = (usize, Transaction);
@@ -61,8 +61,8 @@ impl Default for TxFilter {
 /// needed to use lightning with LDK.  Note: The bdk::Blockchain you use
 /// must implement the IndexedChain trait.
 pub struct LightningWallet<B, D> {
-    client: Mutex<Box<B>>,
-    wallet: Mutex<Wallet<D>>,
+    client: Box<B>,
+    wallet: Wallet<D>,
     filter: Mutex<TxFilter>,
 }
 
@@ -74,8 +74,8 @@ where
     /// create a new lightning wallet from your bdk wallet
     pub fn new(client: Box<B>, wallet: Wallet<D>) -> Self {
         LightningWallet {
-            client: Mutex::new(client),
-            wallet: Mutex::new(wallet),
+            client,
+            wallet,
             filter: Mutex::new(TxFilter::new()),
         }
     }
@@ -98,7 +98,6 @@ where
 
         relevant_txids.sort_unstable();
         relevant_txids.dedup();
-
 
         let unconfirmed_txids = self.get_unconfirmed(relevant_txids)?;
         for unconfirmed_txid in unconfirmed_txids {
@@ -126,8 +125,7 @@ where
     /// this is useful when you need to sweep funds from a channel
     /// back into your onchain wallet.
     pub fn get_unused_address(&self) -> Result<Address, Error> {
-        let wallet = self.get_wallet_lock()?;
-        let address_info = wallet.get_address(AddressIndex::LastUnused)?;
+        let address_info = self.wallet.get_address(AddressIndex::LastUnused)?;
         Ok(address_info.address)
     }
 
@@ -139,10 +137,8 @@ where
         value: u64,
         target_blocks: usize,
     ) -> Result<Transaction, Error> {
-        let client = self.get_client_lock()?;
-        let wallet = self.get_wallet_lock()?;
-        let mut tx_builder = wallet.build_tx();
-        let fee_rate = client.estimate_fee(target_blocks)?;
+        let mut tx_builder = self.wallet.build_tx();
+        let fee_rate = self.client.estimate_fee(target_blocks)?;
 
         tx_builder
             .add_recipient(output_script.clone(), value)
@@ -151,30 +147,23 @@ where
 
         let (mut psbt, _tx_details) = tx_builder.finish()?;
 
-        let _finalized = wallet.sign(&mut psbt, SignOptions::default())?;
+        let _finalized = self.wallet.sign(&mut psbt, SignOptions::default())?;
 
         Ok(psbt.extract_tx())
     }
 
-    /// get the balance of the inner onchain bdk wallet
-    pub fn get_balance(&self) -> Result<Balance, Error> {
-        let wallet = self.get_wallet_lock()?;
-        wallet.get_balance().map_err(Error::Bdk)
+    pub fn get_wallet(&self) -> &Wallet<D> {
+        &self.wallet
     }
 
-    /// get a reference to the inner bdk wallet
-    /// be careful using this because it will hold the lock
-    /// on the inner wallet until the guard is dropped
-    /// this is useful if you need methods on the wallet that
-    /// are not yet exposed on LightningWallet
-    pub fn get_wallet(&self) -> Result<MutexGuard<Wallet<D>>, Error> {
-        Ok(self.get_wallet_lock()?)
+    /// get the balance of the inner onchain bdk wallet
+    pub fn get_balance(&self) -> Result<Balance, Error> {
+        self.wallet.get_balance().map_err(Error::Bdk)
     }
 
     fn sync_onchain_wallet(&self) -> Result<(), Error> {
-        let wallet = self.get_wallet_lock()?;
-        let client = self.get_client_lock()?;
-        wallet.sync(client.as_ref(), SyncOptions::default())?;
+        self.wallet
+            .sync(self.client.as_ref(), SyncOptions::default())?;
         Ok(())
     }
 
@@ -236,15 +225,13 @@ where
 
     /// get a tuple containing the current tip height and header
     pub fn get_tip(&self) -> Result<(u32, BlockHeader), Error> {
-        let client = self.get_client_lock()?;
-        let tip_height = client.get_height()?;
-        let tip_header = client.get_header(tip_height)?;
+        let tip_height = self.client.get_height()?;
+        let tip_header = self.client.get_header(tip_height)?;
         Ok((tip_height, tip_header))
     }
 
     fn augment_txid_with_confirmation_status(&self, txid: Txid) -> Result<(Txid, bool), Error> {
-        let client = self.get_client_lock()?;
-        client
+        self.client
             .get_tx_status(&txid)
             .map(|status| match status {
                 Some(status) => (txid, status.confirmed),
@@ -258,8 +245,7 @@ where
         txid: &Txid,
         script: &Script,
     ) -> Result<Option<TransactionWithHeight>, Error> {
-        let client = self.get_client_lock()?;
-        client
+        self.client
             .get_script_tx_history(script)
             .map(|history| {
                 history
@@ -285,9 +271,7 @@ where
         &self,
         output: &WatchedOutput,
     ) -> Result<Vec<TransactionWithHeight>, Error> {
-        let client = self.get_client_lock()?;
-
-        client
+        self.client
             .get_script_tx_history(&output.script_pubkey)
             .map(|history| self.get_confirmed_txs_from_script_history(history))
             .map_err(Error::Bdk)
@@ -298,9 +282,7 @@ where
         height: u32,
         tx: Transaction,
     ) -> Result<Option<TransactionWithHeightAndPosition>, Error> {
-        let client = self.get_client_lock()?;
-
-        client
+        self.client
             .get_position_in_block(&tx.txid(), height as usize)
             .map(|position| position.map(|pos| (height, tx, pos)))
             .map_err(Error::Bdk)
@@ -311,8 +293,7 @@ where
         height: u32,
         tx_list: Vec<TransactionWithPosition>,
     ) -> Result<(u32, BlockHeader, Vec<TransactionWithPosition>), Error> {
-        let client = self.get_client_lock()?;
-        client
+        self.client
             .get_header(height)
             .map(|header| (height, header, tx_list))
             .map_err(Error::Bdk)
@@ -323,9 +304,7 @@ where
         script: Script,
         txid: Txid,
     ) -> Result<ScriptStatus, Error> {
-        let client = self.get_client_lock()?;
-
-        let history = client.get_script_tx_history(&script)?;
+        let history = self.client.get_script_tx_history(&script)?;
 
         let history_of_tx = history
             .iter()
@@ -347,38 +326,21 @@ where
     }
 
     pub fn estimate_fee(&self, confirmation_target: ConfirmationTarget) -> Result<u32, Error> {
-        let client = self.get_client_lock()?;
-
         let target_blocks = match confirmation_target {
             ConfirmationTarget::Background => 6,
             ConfirmationTarget::Normal => 3,
             ConfirmationTarget::HighPriority => 1,
         };
 
-        let estimate = client.estimate_fee(target_blocks).unwrap_or_default();
+        let estimate = self.client.estimate_fee(target_blocks).unwrap_or_default();
         let sats_per_vbyte = estimate.as_sat_per_vb() as u32;
 
         Ok(sats_per_vbyte)
     }
 
-    // Proxy call to wrap lock into anyhow Error
-    fn get_wallet_lock(&self) -> anyhow::Result<MutexGuard<Wallet<D>>> {
-        self.wallet
-            .lock()
-            .map_err(|e| anyhow!("could not lock wallet: {e:#}"))
-    }
-
-    // Proxy call to wrap lock into anyhow Error
-    fn get_client_lock(&self) -> anyhow::Result<MutexGuard<Box<B>>> {
-        self.client
-            .lock()
-            .map_err(|e| anyhow!("could not lock blockchain client: {e:#}"))
-    }
-
     /// Unlike `broadcast_transaction`, this one allows the client to inspect the errors
     pub fn broadcast(&self, tx: &Transaction) -> Result<(), Error> {
-        let client = self.get_client_lock()?;
-        client
+        self.client
             .broadcast(tx)
             .context("Failed to broadcast transaction")?;
         Ok(())
@@ -391,17 +353,13 @@ where
     D: BatchDatabase,
 {
     fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32 {
-        let estimate = if let Ok(client) = self.client.lock() {
-            let target_blocks = match confirmation_target {
-                ConfirmationTarget::Background => 6,
-                ConfirmationTarget::Normal => 3,
-                ConfirmationTarget::HighPriority => 1,
-            };
-
-            client.estimate_fee(target_blocks).unwrap_or_default()
-        } else {
-            FeeRate::default()
+        let target_blocks = match confirmation_target {
+            ConfirmationTarget::Background => 6,
+            ConfirmationTarget::Normal => 3,
+            ConfirmationTarget::HighPriority => 1,
         };
+
+        let estimate = self.client.estimate_fee(target_blocks).unwrap_or_default();
         let sats_per_vbyte = estimate.as_sat_per_vb() as u32;
         sats_per_vbyte * 253
     }
@@ -413,12 +371,8 @@ where
     D: BatchDatabase,
 {
     fn broadcast_transaction(&self, tx: &Transaction) {
-        if let Ok(client) = self.client.lock() {
-            if let Err(e) = client.broadcast(tx) {
-                eprintln!("Error broadcasting transaction: {e:#}");
-            }
-        } else {
-            eprintln!("Error locking blockchain mutex");
+        if let Err(e) = self.client.broadcast(tx) {
+            eprintln!("Error broadcasting transaction: {e:#}");
         }
     }
 }
