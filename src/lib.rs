@@ -93,7 +93,13 @@ where
 
         let mut relevant_txids = confirmables
             .iter()
-            .flat_map(|confirmable| confirmable.get_relevant_txids())
+            .flat_map(|confirmable| {
+                confirmable
+                    .get_relevant_txids()
+                    .iter()
+                    .map(|x| x.0)
+                    .collect::<Vec<Txid>>()
+            })
             .collect::<Vec<Txid>>();
 
         relevant_txids.sort_unstable();
