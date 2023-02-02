@@ -1,5 +1,5 @@
 use anyhow::Context;
-use bdk::bitcoin::{Address, BlockHeader, Script, Transaction, Txid};
+use bdk::bitcoin::{Address, BlockHash, BlockHeader, Script, Transaction, Txid};
 use bdk::blockchain::{Blockchain, GetHeight, WalletSync};
 use bdk::database::BatchDatabase;
 use bdk::wallet::{AddressIndex, Wallet};
@@ -94,7 +94,7 @@ where
         let mut relevant_txids = confirmables
             .iter()
             .flat_map(|confirmable| confirmable.get_relevant_txids())
-            .collect::<Vec<Txid>>();
+            .collect::<Vec<(Txid, Option<BlockHash>)>>();
 
         relevant_txids.sort_unstable();
         relevant_txids.dedup();
@@ -175,13 +175,13 @@ where
         Ok(())
     }
 
-    fn get_unconfirmed(&self, txids: Vec<Txid>) -> Result<Vec<Txid>, Error> {
+    fn get_unconfirmed(&self, txids: Vec<(Txid, Option<BlockHash>)>) -> Result<Vec<Txid>, Error> {
         Ok(txids
             .into_iter()
-            .map(|txid| self.augment_txid_with_confirmation_status(txid))
+            .map(|txid| self.augment_txid_with_confirmation_status(txid.0))
             .collect::<Result<Vec<(Txid, bool)>, Error>>()?
             .into_iter()
-            .filter(|(_txid, confirmed)| !confirmed)
+            .filter(|(_txid, confirmed)| !*confirmed)
             .map(|(txid, _)| txid)
             .collect())
     }
